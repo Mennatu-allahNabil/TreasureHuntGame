@@ -429,7 +429,7 @@ class TreasureHuntEnv(gym.Env):
 
 class TreasureHuntUI(QMainWindow):
     """Main window for the Treasure Hunt game"""
-    def __init__(self, size=25, max_steps=150, special_duration=10):
+    def __init__(self, size=9, max_steps=100, special_duration=10):
         super().__init__()
         # Game settings
         self.size, self.max_steps, self.special_duration = size, max_steps, special_duration
