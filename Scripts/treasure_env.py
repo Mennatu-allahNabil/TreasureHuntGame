@@ -388,22 +388,101 @@ class TreasureHuntEnv(gym.Env):
             self.window.event_label.setText(f"Event: {event}" if event else "")
 
         return self._get_observation(), reward, done, False, {'event': event, 'score': self.score, 'rewards_by_type': self.reward_by_type}
-    
     """Spawn a special treasure that disappears after a time"""
     def spawn_special_treasure(self):
-        pass
+        # Find empty cells where special treasures can be placed
+        empty_cells = [(x, y) for x in range(self.size) for y in range(self.size)
+                      if self.grid[x][y] == CellType.EMPTY.value and (x, y) != self.agent_pos]
+
+        if empty_cells:
+            x, y = random.choice(empty_cells)
+            self.grid[x][y] = CellType.SPECIAL.value
+            self.special_treasures.append([(x, y), self.special_duration])
+            return True
+        return False
 
     """Update timers for special treasures and remove expired ones"""
     def update_special_treasures(self):
-        pass
+        updated_treasures = []
+        for (x, y), duration in self.special_treasures:
+            if duration > 1:
+                updated_treasures.append([(x, y), duration - 1])
+            elif self.grid[x][y] == CellType.SPECIAL.value:
+                self.grid[x][y] = CellType.EMPTY.value
+
+        self.special_treasures = updated_treasures
 
     """Render the environment"""
     def render(self):
-        pass
+        if self.render_mode == 'human':
+            if self.window:
+                self.app.processEvents()
+            return None
+
 
     """Close the environment and cleanup resources"""
     def close(self):
-       pass
-    
+        if self.window:
+            self.window.close()
+            self.window = None
+
+
 class TreasureHuntUI(QMainWindow):
-    pass
+    """Main window for the Treasure Hunt game"""
+    def __init__(self, size=25, max_steps=150, special_duration=10):
+        super().__init__()
+        # Game settings
+        self.size, self.max_steps, self.special_duration = size, max_steps, special_duration
+        self.grid = np.zeros((size, size), dtype=np.int32)  # Initialize empty grid
+        self.agent_pos = (size//2, size//2)  # Start agent in center
+        self.steps_left = max_steps  # Initialize step counter
+        self.score, self.lives = 0, 3  # Initialize score and lives
+        self.game_over = False  # Game not over yet
+        self.special_treasures = []  # No special treasures at start
+        self.steps_to_next_special = random.randint(15, 30)  # Random steps until first special treasure appears on the grid
+
+        # Setup UI components
+        self.setup_ui()
+        self.setWindowTitle("Treasure Hunt Game")
+        self.resize(600, 700)
+
+    """Setup the ui components"""
+    def setup_ui(self):
+        # Create central widget and main layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+
+        # Game canvas for drawing the grid
+        self.canvas = GameCanvas()
+        main_layout.addWidget(self.canvas, 1)
+
+        # Info display frame for game stats
+        info_frame = QFrame()
+        info_layout = QVBoxLayout(info_frame)
+        self.info_label = QLabel()  # Display score, lives, steps
+        self.info_label.setFont(QFont("Arial", 12))
+        self.special_label = QLabel()  # Display special treasures info
+        self.special_label.setFont(QFont("Arial", 10))
+        self.event_label = QLabel("Gym Environment Running")  # Display event messages
+        self.event_label.setFont(QFont("Arial", 10))
+
+        info_layout.addWidget(self.info_label)
+        info_layout.addWidget(self.special_label)
+        info_layout.addWidget(self.event_label)
+        main_layout.addWidget(info_frame)
+
+    """Update the display with current game state"""
+    def update_display(self):
+        self.canvas.set_data(self.grid, self.size, self.agent_pos)
+
+        # Update info labels
+        heart_icons = "❤️" * self.lives
+        self.info_label.setText(f"Score: {self.score} | Lives: {heart_icons} | Steps left: {self.steps_left}")
+
+        # Update special treasures info
+        if self.special_treasures:
+            special_info = [f"💎 at ({y},{x}): {time} steps left" for (x, y), time in self.special_treasures]
+            self.special_label.setText(" | ".join(special_info))
+        else:
+            self.special_label.setText("No special treasures active")
