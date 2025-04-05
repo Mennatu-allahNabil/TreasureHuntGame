@@ -133,5 +133,277 @@ class TreasureHuntEnv(gym.Env):
 
         # Initialize state variables
         self.reset()
+ """Reset the environment to initial state"""
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed, options=options)
+
+        # Reset game state
+        self.grid = np.zeros((self.size, self.size), dtype=np.int32)  # Empty grid
+        self.agent_pos = (self.size//2, self.size//2)  # Start agent in center
+        self.steps_left = self.max_steps  # Reset step counter
+        self.score = 0  # Reset score
+        self.lives = self.lives_reset  # Reset lives
+        self.game_over = False  # Game not over yet
+        self.special_treasures = []  # No special treasures at start
+        self.steps_to_next_special = random.randint(15, 30)  # Random steps until first special treasure appears on the grid
+        self.collectible_cells = [CellType.TREASURE.value, CellType.SPECIAL.value]  # Define collectible items as both the normal treasuers and the special treasures
+        
+        # Track rewards by type
+        self.reward_by_type = {
+            "treasure": 0,
+            "special": 0,
+            "trap": 0,
+            "enemy": 0,
+            "timeout": 0,
+            "all_treasures": 0
+        }
+
+        # Create the grid
+        self._create_map()
+
+        # Update rendering if active
+        if self.render_mode == 'human' and self.window:
+            self.window.grid = self.grid.copy()
+            self.window.agent_pos = self.agent_pos
+            self.window.steps_left = self.steps_left
+            self.window.lives = self.lives
+            self.window.score = self.score
+            self.window.special_treasures = self.special_treasures.copy()
+            self.window.update_display()
+            self.window.show()
+
+        return self._get_observation(), {}
+
+    """Get the current observation state"""
+    def _get_observation(self):
+        # Convert special treasures to numpy array format for observation space
+        special_array = np.zeros((self.size * self.size, 2), dtype=np.int32)
+        for i, ((x, y), duration) in enumerate(self.special_treasures):
+            if i < self.size * self.size:  # Check if the number of special treasures is below the grid cells number
+                special_array[i] = [x * self.size + y, duration]
+        return {
+            'grid': self.grid.copy(),
+            'agent_pos': np.array(self.agent_pos),
+            'steps_left': self.steps_left,
+            'lives': self.lives,
+            'special_treasures': special_array
+        }
+
+    """Create the grid with random placement of items"""
+    def _create_map(self):
+        self.grid = np.array([
+            [CellType.OBSTACLE.value, CellType.TREASURE.value, CellType.OBSTACLE.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.OBSTACLE.value],
+            [CellType.TRAP.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.TREASURE.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.TRAP.value, CellType.EMPTY.value, CellType.EMPTY.value],
+            [CellType.OBSTACLE.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.TREASURE.value, CellType.EMPTY.value, CellType.OBSTACLE.value, CellType.EMPTY.value, CellType.TREASURE.value, CellType.TRAP.value],
+            [CellType.EMPTY.value, CellType.EMPTY.value, CellType.TREASURE.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.OBSTACLE.value, CellType.EMPTY.value],
+            [CellType.EMPTY.value, CellType.EMPTY.value, CellType.TREASURE.value, CellType.OBSTACLE.value, CellType.EMPTY.value, CellType.TREASURE.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.EMPTY.value],
+            [CellType.EMPTY.value, CellType.TREASURE.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.TREASURE.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.EMPTY.value],
+            [CellType.OBSTACLE.value, CellType.EMPTY.value, CellType.ENEMY.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.OBSTACLE.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.EMPTY.value],
+            [CellType.EMPTY.value, CellType.TRAP.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.TREASURE.value, CellType.TRAP.value, CellType.TREASURE.value, CellType.EMPTY.value, CellType.OBSTACLE.value],
+            [CellType.EMPTY.value, CellType.TREASURE.value, CellType.EMPTY.value, CellType.TRAP.value, CellType.TREASURE.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.EMPTY.value, CellType.EMPTY.value]
+        ])
+        
+    
+    """Perform step in the environment"""
+    def step(self, action):
+        if self.game_over or self.steps_left <= 0:
+            return self._get_observation(), 0, True, False, {'event': 'game_over', 'rewards_by_type': self.reward_by_type}
+
+        event = ""
+        reward = 0  # Base step penalty
+        
+        # Initialize tracking variables if they don't exist
+        if not hasattr(self, 'previous_positions'):
+            self.previous_positions = []  # Track previous positions
+        if not hasattr(self, 'position_counts'):
+            self.position_counts = {}  # Count visits to each position
+        if not hasattr(self, 'steps_since_danger'):
+            self.steps_since_danger = 0  # Count steps since last trap or enemy
+        if not hasattr(self, 'missed_special'):
+            self.missed_special = []  # Track special treasures that disappeared
+
+        old_pos = self.agent_pos
+        moved = False
+
+        # Movement actions in the 4-neighbours
+        if action < 4:  # UP, RIGHT, DOWN, LEFT
+            x, y = self.agent_pos
+            dx, dy = {
+                self.UP: (-1, 0),
+                self.RIGHT: (0, 1),
+                self.DOWN: (1, 0),
+                self.LEFT: (0, -1)
+            }[action]
+
+            nx, ny = x + dx, y + dy
+            # Move agent if valid
+            if 0 <= nx < self.size and 0 <= ny < self.size and self.grid[nx][ny] != CellType.OBSTACLE.value:
+                self.agent_pos = (nx, ny)
+                moved = True
+
+                # Automatic collection of treasures when stepping on them
+                cell_type = self.grid[nx, ny]
+                if cell_type in self.collectible_cells:
+                    if cell_type == CellType.TREASURE.value:
+                        reward += 30
+                        self.score += 30
+                        self.reward_by_type["treasure"] += 30
+                        self.grid[nx, ny] = CellType.EMPTY.value
+                        event = "treasure_collected"
+                    elif cell_type == CellType.SPECIAL.value:
+                        reward += 50
+                        self.score += 50
+                        self.reward_by_type["special"] += 50
+                        self.grid[nx, ny] = CellType.EMPTY.value
+                        # Remove from special treasures list
+                        self.special_treasures = [t for t in self.special_treasures if t[0] != (nx, ny)]
+                        event = "special_collected"
+
+                # Handle traps and enemies
+                elif cell_type == CellType.TRAP.value:
+                    reward -= 10
+                    self.score -= 10
+                    self.reward_by_type["trap"] -= 10
+                    event = "trapped"
+                    self.steps_since_danger = 0  # Reset the counter when hitting a trap
+                elif cell_type == CellType.ENEMY.value:
+                    self.lives -= 1
+                    reward -= 20
+                    self.score = self.score - 20
+                    self.reward_by_type["enemy"] -= 20
+                    event = "caught"
+                    self.steps_since_danger = 0  # Reset the counter when hitting an enemy
+                    if self.lives <= 0:
+                        self.game_over = True
+        
+        # Track positions
+        self.previous_positions.append(self.agent_pos)
+        if len(self.previous_positions) > 20:  # Keep only last 20 positions
+            self.previous_positions.pop(0)
+        
+        # Count position visits
+        pos_key = str(self.agent_pos)
+        self.position_counts[pos_key] = self.position_counts.get(pos_key, 0) + 1
+        
+        # PENALTY 1: Penalize for staying in the same position (-2)
+        if not moved:
+            reward -= 2
+            self.score -= 2
+            if not hasattr(self.reward_by_type, "stuck"):
+                self.reward_by_type["stuck"] = 0
+            self.reward_by_type["stuck"] -= 2
+            event += " stuck"
+            # Reset danger avoidance counter when stuck
+            self.steps_since_danger = 0
+        
+        # PENALTY 2: Penalize for revisiting the same 4 or fewer cells multiple times (-5)
+        if len(set(self.previous_positions[-10:])) <= 4 and len(self.previous_positions) >= 10:
+            # Check if we've moved between these few cells at least 3 times
+            if self.position_counts[pos_key] >= 3:
+                reward -= 5
+                self.score -= 5
+                if not hasattr(self.reward_by_type, "circle_movement"):
+                    self.reward_by_type["circle_movement"] = 0
+                self.reward_by_type["circle_movement"] -= 5
+                event +=" circle_movement"
+        
+        # PENALTY 3: Penalize for missing special rewards (-3)
+        # Check if any special treasures disappeared in this step
+        old_special_positions = set(pos for pos, _ in self.special_treasures)
+        
+        # Update special treasures
+        old_special_treasures = self.special_treasures.copy()
+        self.update_special_treasures()
+        
+        # Find disappeared special treasures (excluding collected ones)
+        new_special_positions = set(pos for pos, _ in self.special_treasures)
+        disappeared = old_special_positions - new_special_positions
+        
+        # If the agent didn't collect it but it disappeared, penalize
+        for pos in disappeared:
+            if pos != self.agent_pos:  # It wasn't collected, it timed out
+                reward -= 3
+                self.score -= 3
+                if not hasattr(self.reward_by_type, "missed_special"):
+                    self.reward_by_type["missed_special"] = 0
+                self.reward_by_type["missed_special"] -= 3
+                self.missed_special.append(pos)
+                event += " missed_special"
+        
+        # BONUS: Reward for avoiding traps and enemies for 10 steps (+10)
+        # Only increment if the agent actually moved
+        if moved:
+            self.steps_since_danger += 1
+            if self.steps_since_danger >= 10:
+                # Only give bonus once every 10 steps
+                if self.steps_since_danger % 10 == 0:
+                    reward += 10
+                    self.score += 10
+                    if not hasattr(self.reward_by_type, "danger_avoidance"):
+                        self.reward_by_type["danger_avoidance"] = 0
+                    self.reward_by_type["danger_avoidance"] += 10
+                    event +=  " danger_avoidance_bonus"
+        
+        # Update the steps left for the agent  
+        self.steps_left -= 1
+
+        # Special treasure spawning logic
+        self.steps_to_next_special -= 1
+        if self.steps_to_next_special <= 0:
+            self.spawn_special_treasure()
+            self.steps_to_next_special = random.randint(15, 30)
+
+        # Check ending conditions
+        done = False
+        if self.steps_left <= 0:
+            self.reward_by_type["timeout"] -= 200
+            reward -= 200
+            self.game_over = True
+            event = "timeout"
+            done = True
+
+        if self.lives <= 0:
+            self.game_over = True
+            event = "game_over"
+            done = True
+
+        # Check if all treasures collected
+        if not np.any(self.grid == CellType.TREASURE.value) and not done:
+            reward += 200  # Bonus for collecting all treasures
+            self.score += 200
+            self.reward_by_type["all_treasures"] += 200
+            self.game_over = True
+            event = "all_treasures_collected"
+            done = True
+
+        # Update rendering if active
+        if self.render_mode == 'human' and self.window:
+            self.window.grid = self.grid.copy()
+            self.window.agent_pos = self.agent_pos
+            self.window.steps_left = self.steps_left
+            self.window.lives = self.lives
+            self.window.score = self.score
+            self.window.special_treasures = self.special_treasures.copy()
+            self.window.update_display()
+            self.window.event_label.setText(f"Event: {event}" if event else "")
+
+        return self._get_observation(), reward, done, False, {'event': event, 'score': self.score, 'rewards_by_type': self.reward_by_type}
+    
+    """Spawn a special treasure that disappears after a time"""
+    def spawn_special_treasure(self):
+        pass
+
+    """Update timers for special treasures and remove expired ones"""
+    def update_special_treasures(self):
+        pass
+
+    """Render the environment"""
+    def render(self):
+        pass
+
+    """Close the environment and cleanup resources"""
+    def close(self):
+       pass
+    
 class TreasureHuntUI(QMainWindow):
     pass
